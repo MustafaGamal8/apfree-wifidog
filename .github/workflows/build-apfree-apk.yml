@@ -1,0 +1,75 @@
+name: Build ApFree WiFiDog APK (OpenWrt 25.12.6 x86_64)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout ApFree source
+        uses: actions/checkout@v4
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gettext git \
+            libncurses-dev libssl-dev python3 python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget curl cmake pkg-config zstd
+
+      - name: Restore OpenWrt SDK cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64
+          key: openwrt-sdk-25.12.6-x86-64-gcc-14.3.0-musl-v1
+
+      - name: Download OpenWrt 25.12.6 x86_64 SDK if not cached
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_dir="$RUNNER_TEMP/openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64"
+          if [[ ! -d "$sdk_dir" ]]; then
+            sdk_archive="$RUNNER_TEMP/openwrt-sdk.tar.zst"
+            sdk_url="https://downloads.openwrt.org/releases/25.12.6/targets/x86/64/openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+            curl -fL --retry 3 "$sdk_url" -o "$sdk_archive"
+            tar --zstd -xf "$sdk_archive" -C "$RUNNER_TEMP"
+          fi
+          echo "SDK_DIR=$sdk_dir" >> "$GITHUB_ENV"
+
+      - name: Prepare package feed and source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SDK_DIR"
+          ./scripts/feeds update base packages
+          ./scripts/feeds install apfree-wifidog
+          test -f "$SDK_DIR/feeds/packages/net/apfree-wifidog/Makefile"
+          PACKAGE_MAKEFILE="$SDK_DIR/feeds/packages/net/apfree-wifidog/Makefile" \
+          DL_DIR="$SDK_DIR/dl" \
+          SOURCE_REPO="$GITHUB_WORKSPACE" \
+            bash "$GITHUB_WORKSPACE/scripts/package_apfree_wifidog_to_openwrt_dl.sh"
+
+      - name: Build ApFree APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SDK_DIR"
+          make package/feeds/packages/apfree-wifidog/compile -j"$(nproc)" V=s
+          mkdir -p "$RUNNER_TEMP/apfree-apk"
+          find "$SDK_DIR/bin" -type f -name 'apfree-wifidog*.apk' -exec cp -v {} "$RUNNER_TEMP/apfree-apk/" \;
+          test -n "$(find "$RUNNER_TEMP/apfree-apk" -type f -name '*.apk' -print -quit)"
+          printf 'Built APK files:\n'
+          find "$RUNNER_TEMP/apfree-apk" -maxdepth 1 -type f -printf '%f\n'
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apfree-wifidog-openwrt-25.12.6-x86_64
+          path: ${{ runner.temp }}/apfree-apk/*.apk
+          if-no-files-found: error
+          retention-days: 7
